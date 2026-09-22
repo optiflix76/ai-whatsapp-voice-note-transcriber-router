@@ -1,0 +1,947 @@
+{
+  "name": "Voice Note Transcriber & Router",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "# 🎙️ Voice Note Transcriber & Router\n**WhatsApp voice note arrives → downloaded → transcribed by Whisper → LLM extracts intent, action items & decisions → routed to CRM, task manager, or flagged for human review.**\nBuilt for the Gulf, where voice notes are how business actually gets done.",
+        "height": 158,
+        "width": 1400,
+        "color": 7
+      },
+      "id": "0be73e9a-4c0d-43d2-9467-5ac2054c94be",
+      "name": "🎙️ Header",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1632,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🟦 Zone A\n### Ingestion\nReceives the WhatsApp webhook from Meta Cloud API, acknowledges it instantly (200 OK), then downloads the audio file using the Media API.\n\n**Supports:**\n- Voice notes (audio/ogg)\n- Audio messages (mp3, m4a)\n\n**Ignores:**\n- Text messages\n- Images / docs\n- Delivery receipts",
+        "height": 1316,
+        "width": 1496,
+        "color": 3
+      },
+      "id": "be6df687-4e32-45da-bb65-a589c35723d5",
+      "name": "ZONE A",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1632,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🟨 Zone B\n### Transcription\nDownloaded audio is sent to OpenAI Whisper for transcription.\n\n**Language handling:**\n- Auto-detects Arabic & English\n- Gulf dialect aware\n- Mixed-language (code-switching) supported\n\n**Alt engines:**\n- Azure Speech-to-Text\n- AssemblyAI\n- Deepgram Nova-2",
+        "height": 756,
+        "width": 792,
+        "color": 4
+      },
+      "id": "a37dd36b-07a4-4293-9206-bd85879325fc",
+      "name": "ZONE B",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3296,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🟪 Zone C\n### AI Analysis\nThe transcript is sent to an LLM which returns structured JSON:\n\n- `intent` — what kind of message\n- `summary` — 1-2 sentence digest\n- `action_items` — list of tasks\n- `decisions` — confirmed approvals\n- `sentiment` — positive / neutral / urgent / negative\n- `language` — ar / en / mixed\n- `requires_human` — true/false",
+        "height": 916,
+        "width": 536,
+        "color": 6
+      },
+      "id": "407a3f83-e494-4d75-8599-c45651748008",
+      "name": "ZONE C",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        4240,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🟩 Zone D\n### Routing & Output\nBased on intent, data fans out to:\n\n- 📋 **ClickUp / Asana** — action items become tasks\n- 🗂️ **HubSpot / Zoho CRM** — client feedback logged as activity\n- 📝 **Notion / Google Sheets** — full transcript archived\n- 💬 **Slack** — always fires a digest\n- 🔴 **Human Review** — urgent or ambiguous notes flagged",
+        "height": 2340,
+        "width": 2168,
+        "color": 2
+      },
+      "id": "51a280c8-3db1-404a-a4f5-74f97d76e047",
+      "name": "ZONE D",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        5296,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice-note-router",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e665bcdb-8e8a-41cd-95ed-d9c2e3c5d041",
+      "name": "💬 WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        2064,
+        576
+      ],
+      "webhookId": "voice-note-router-webhook"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"ok\" }",
+        "options": {}
+      },
+      "id": "9a96e203-00f4-49b3-b392-af33188e26cb",
+      "name": "✅ Acknowledge (200 OK)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2240,
+        992
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────\n// PARSE WHATSAPP WEBHOOK PAYLOAD\n// Extracts the message object from Meta's nested structure.\n// Filters out anything that is not an audio/voice message\n// so the rest of the workflow only sees voice notes.\n// ─────────────────────────────────────────────────────────\n\nconst body = $json.body;\n\nlet message, senderPhone, senderName, businessPhone;\n\ntry {\n  const entry   = body.entry?.[0];\n  const change  = entry?.changes?.[0];\n  const value   = change?.value;\n\n  message       = value?.messages?.[0];\n  senderPhone   = message?.from;\n  businessPhone = value?.metadata?.display_phone_number || 'unknown';\n\n  // Resolve sender display name from contacts array if available\n  const contact = value?.contacts?.[0];\n  senderName = contact?.profile?.name || senderPhone;\n\n} catch (err) {\n  throw new Error('Failed to parse Meta webhook payload: ' + err.message);\n}\n\n// ── Filter: only process audio messages ──────────────────\nconst messageType = message?.type;\nif (!message || (messageType !== 'audio' && messageType !== 'voice')) {\n  // Not a voice note — stop this execution gracefully.\n  return [];\n}\n\nconst audioId       = message.audio?.id || message.voice?.id;\nconst audiaMimeType = message.audio?.mime_type || message.voice?.mime_type || 'audio/ogg';\nconst timestamp     = message.timestamp\n  ? new Date(parseInt(message.timestamp) * 1000).toISOString()\n  : new Date().toISOString();\n\nif (!audioId) {\n  throw new Error('Audio message found but media ID is missing.');\n}\n\nreturn [{\n  json: {\n    audioId,\n    audiaMimeType,\n    senderPhone,\n    senderName,\n    businessPhone,\n    messageType,\n    receivedAt: timestamp\n  }\n}];"
+      },
+      "id": "d8d7861f-8214-491d-81bd-bb24fa4b7a87",
+      "name": "🔍 Parse Webhook Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Returns `[]` for non-audio messages (texts, images, receipts). Execution stops silently — no error fired.",
+        "height": 122,
+        "width": 220,
+        "color": 6
+      },
+      "id": "65b10ef0-a67a-4ded-8b0c-d4f69d981a52",
+      "name": "parse note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2592,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.audioId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "e0a573ee-3dc4-40c0-a03b-8de4bd491bc2",
+      "name": "📡 Get Media URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2928,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "audioData"
+            }
+          }
+        }
+      },
+      "id": "e38784d7-a8f3-424a-87a4-4013489af4a4",
+      "name": "⬇️ Download Audio File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        3408,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Meta media URLs expire after ~5 min. These two steps (resolve URL → download) must run in sequence immediately after the webhook fires.",
+        "height": 164,
+        "width": 220,
+        "color": 6
+      },
+      "id": "ee0892f7-a2bb-4cd2-8be8-01d67656567b",
+      "name": "download note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3344,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "whisper-1"
+            },
+            {
+              "name": "language"
+            },
+            {
+              "name": "response_format",
+              "value": "verbose_json"
+            },
+            {
+              "name": "file",
+              "value": "={{ $binary.audioData }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6e7fd5af-ab2c-465f-afa7-36c5b2dd3178",
+      "name": "🎙️ Whisper Transcription",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        3728,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "content": "**Alt transcription engines:**\n- AssemblyAI — better speaker diarisation\n- Azure Speech — data residency in UAE North\n- Deepgram Nova-2 — fastest, cheapest",
+        "height": 190,
+        "width": 220,
+        "color": 6
+      },
+      "id": "4aa2fbdb-97fa-4105-a6bd-a4893e20e516",
+      "name": "whisper alt",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3680,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────\n// PREPARE TRANSCRIPT\n// Whisper returns verbose_json which includes the full text\n// plus segment-level timestamps. We extract what we need\n// and pass it forward cleanly.\n// ─────────────────────────────────────────────────────────\n\nconst whisperResult = $json;\nconst upstream      = $('🔍 Parse Webhook Payload').first().json;\n\nconst transcriptText  = whisperResult.text?.trim() || '';\nconst detectedLang    = whisperResult.language      || 'unknown';\nconst durationSeconds = whisperResult.duration      || 0;\n\nif (!transcriptText) {\n  throw new Error('Whisper returned an empty transcript. The audio may be silent or corrupted.');\n}\n\n// Rough word count (useful for analytics)\nconst wordCount = transcriptText.split(/\\s+/).filter(Boolean).length;\n\nreturn [{\n  json: {\n    // Ingestion metadata\n    senderPhone:    upstream.senderPhone,\n    senderName:     upstream.senderName,\n    businessPhone:  upstream.businessPhone,\n    receivedAt:     upstream.receivedAt,\n    audioId:        upstream.audioId,\n\n    // Transcript\n    transcript:     transcriptText,\n    language:       detectedLang,\n    durationSec:    Math.round(durationSeconds),\n    wordCount\n  }\n}];"
+      },
+      "id": "46cef5cf-8626-4206-8048-402bcb319e68",
+      "name": "📝 Prepare Transcript",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3936,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "chat"
+      },
+      "id": "53b0f927-0cfa-4c81-86a9-45a711042db2",
+      "name": "🤖 LLM: Analyse Intent",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.4,
+      "position": [
+        4336,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "content": "**Alt:** Claude is preferred for Arabic-heavy transcripts. Swap model node — the prompt and schema work unchanged.",
+        "height": 138,
+        "width": 220,
+        "color": 5
+      },
+      "id": "ef59445d-d4c1-4b76-a3eb-080f2396cd78",
+      "name": "llm alt",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        4288,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────\n// PARSE & MERGE LLM OUTPUT\n// Strips markdown fences, parses JSON, merges with\n// transcript metadata, and produces the single object\n// that all downstream routing nodes consume.\n// ─────────────────────────────────────────────────────────\n\nconst llmRaw   = $json.message?.content\n               || $json.choices?.[0]?.message?.content\n               || '';\n\nconst upstream = $('📝 Prepare Transcript').first().json;\n\nconst cleaned = llmRaw\n  .replace(/```json\\s*/gi, '')\n  .replace(/```\\s*/g, '')\n  .trim();\n\nlet analysis;\ntry {\n  analysis = JSON.parse(cleaned);\n} catch (err) {\n  throw new Error(`LLM returned invalid JSON. Raw: ${llmRaw.slice(0, 200)}`);\n}\n\n// ── Build Slack digest (used by multiple output nodes) ────\nconst taskLines = (analysis.action_items || [])\n  .map((t, i) => `  ${i + 1}. ${t.task}${t.assignee_hint ? ' → ' + t.assignee_hint : ''}${t.due_hint ? ' (by ' + t.due_hint + ')' : ''}`)\n  .join('\\n');\n\nconst decisionLines = (analysis.decisions || [])\n  .map(d => `  • ${d}`)\n  .join('\\n');\n\nconst sentimentEmoji = {\n  positive: '🟢', neutral: '🔵', urgent: '🟠', negative: '🔴'\n}[analysis.sentiment] || '⚪';\n\nconst slackDigest =\n  `${sentimentEmoji} *Voice Note — ${analysis.intent?.replace(/_/g, ' ').toUpperCase()}*\\n` +\n  `*From:* ${upstream.senderName} (${upstream.senderPhone})\\n` +\n  `*Received:* ${upstream.receivedAt}\\n` +\n  `*Duration:* ${upstream.durationSec}s  |  *Language:* ${analysis.language}\\n\\n` +\n  `*Summary:*\\n${analysis.summary}\\n` +\n  (taskLines    ? `\\n*Action Items:*\\n${taskLines}\\n`    : '') +\n  (decisionLines ? `\\n*Decisions:*\\n${decisionLines}\\n` : '') +\n  (analysis.requires_human_review ? `\\n⚠️ *Needs Review:* ${analysis.review_reason}` : '');\n\nreturn [{\n  json: {\n    // Pass-through\n    ...upstream,\n    // LLM analysis\n    intent:              analysis.intent,\n    summary:             analysis.summary,\n    actionItems:         analysis.action_items   || [],\n    decisions:           analysis.decisions      || [],\n    sentiment:           analysis.sentiment,\n    language:            analysis.language,\n    keyEntities:         analysis.key_entities   || {},\n    requiresHumanReview: analysis.requires_human_review || false,\n    reviewReason:        analysis.review_reason  || null,\n    // Pre-formatted outputs\n    slackDigest\n  }\n}];"
+      },
+      "id": "019dd788-810a-41f2-aecd-fb1ec8a4060b",
+      "name": "🔧 Parse LLM Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4576,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.requiresHumanReview }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "Human Review"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "task_assignment",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "Task"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "client_feedback",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "CRM"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "complaint",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "CRM"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "approval",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "Archive"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "94dcf7ec-963a-4817-8282-f7fc198c4ce3",
+      "name": "📂 Intent Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        5344,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Human Review always wins — checked first regardless of intent. Fallback (ambiguous / social / internal_update) goes straight to Archive + Slack only.",
+        "height": 110,
+        "color": 4
+      },
+      "id": "37136e89-fb9b-4729-a025-8a172c16dc0f",
+      "name": "router note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        6112,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "team": {
+          "__rl": true,
+          "value": "<YOUR_CLICKUP_TEAM_ID>",
+          "mode": "id"
+        },
+        "space": {
+          "__rl": true,
+          "value": "<YOUR_CLICKUP_SPACE_ID>",
+          "mode": "id"
+        },
+        "list": {
+          "__rl": true,
+          "value": "<YOUR_CLICKUP_LIST_ID>",
+          "mode": "id"
+        },
+        "name": "=🎙️ {{ $json.actionItems[0]?.task || 'Voice Note Task' }}",
+        "additionalFields": {
+          "priority": "={{ $json.sentiment === 'urgent' ? 1 : $json.sentiment === 'negative' ? 2 : 3 }}",
+          "tags": [
+            "voice-note",
+            "whatsapp-automation"
+          ]
+        }
+      },
+      "id": "90938f99-3c9f-41a3-8e21-5d336e90fb4c",
+      "name": "📋 ClickUp — Create Task",
+      "type": "n8n-nodes-base.clickUp",
+      "typeVersion": 1,
+      "position": [
+        6160,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "content": "**Alt:** Swap for Asana node (`Create Task` operation). Same fields map directly. Priority maps to Asana's `high / normal / low`.",
+        "height": 138,
+        "width": 220,
+        "color": 6
+      },
+      "id": "0ff3df8f-68ed-4786-9732-6b0688a956a2",
+      "name": "clickup alt",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        6128,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────\n// SPLIT REMAINING ACTION ITEMS\n// The first task was created in ClickUp by the previous node.\n// This node emits one item per remaining action item so\n// each gets its own ClickUp task. If only one task exists,\n// this node returns nothing.\n// ─────────────────────────────────────────────────────────\n\nconst items      = $json.actionItems || [];\nconst remaining  = items.slice(1);   // skip index 0 — already created\n\nif (remaining.length === 0) return [];\n\nreturn remaining.map(task => ({\n  json: {\n    ...$json,\n    currentTask: task\n  }\n}));"
+      },
+      "id": "b9990fcb-cd6e-42c6-9c15-2f2f47645943",
+      "name": "🔁 Split Remaining Tasks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6656,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "team": {
+          "__rl": true,
+          "value": "<YOUR_CLICKUP_TEAM_ID>",
+          "mode": "id"
+        },
+        "space": {
+          "__rl": true,
+          "value": "<YOUR_CLICKUP_SPACE_ID>",
+          "mode": "id"
+        },
+        "list": {
+          "__rl": true,
+          "value": "<YOUR_CLICKUP_LIST_ID>",
+          "mode": "id"
+        },
+        "name": "=🎙️ {{ $json.currentTask.task }}",
+        "additionalFields": {
+          "priority": "={{ $json.sentiment === 'urgent' ? 1 : 3 }}"
+        }
+      },
+      "id": "c2b6c5eb-85bb-42cf-b47b-b58124cf9363",
+      "name": "📋 ClickUp — Extra Tasks",
+      "type": "n8n-nodes-base.clickUp",
+      "typeVersion": 1,
+      "position": [
+        6960,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "engagement",
+        "type": "NOTE",
+        "additionalFields": {}
+      },
+      "id": "8a093a05-e73e-466b-9b07-5a97c3bc8114",
+      "name": "🗂️ HubSpot — Log Activity",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [
+        5952,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "content": "**Alt:** Zoho CRM node (`Create Note` on a contact). Match sender phone to existing contact first with a `Search Records` node upstream.",
+        "height": 154,
+        "width": 220,
+        "color": 6
+      },
+      "id": "8fc22fb6-a075-4455-b039-e764fbd5b8ab",
+      "name": "hubspot alt",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        5920,
+        864
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "<YOUR_GOOGLE_SHEET_ID>",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Voice Notes",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $json.receivedAt }}",
+            "sender_name": "={{ $json.senderName }}",
+            "sender_phone": "={{ $json.senderPhone }}",
+            "duration_sec": "={{ $json.durationSec }}",
+            "language": "={{ $json.language }}",
+            "intent": "={{ $json.intent }}",
+            "sentiment": "={{ $json.sentiment }}",
+            "summary": "={{ $json.summary }}",
+            "transcript": "={{ $json.transcript }}",
+            "action_items": "={{ JSON.stringify($json.actionItems) }}",
+            "decisions": "={{ JSON.stringify($json.decisions) }}",
+            "key_entities": "={{ JSON.stringify($json.keyEntities) }}",
+            "requires_review": "={{ $json.requiresHumanReview }}",
+            "review_reason": "={{ $json.reviewReason || '' }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "ba72f19f-b6f9-43fe-babc-5e71abe36d42",
+      "name": "📊 Archive to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [
+        6608,
+        1504
+      ]
+    },
+    {
+      "parameters": {
+        "content": "**Alt:** Notion database (`Create Page`). Map the same fields to Notion properties.",
+        "height": 112,
+        "width": 220,
+        "color": 6
+      },
+      "id": "144bd8b0-3f52-4b8a-9704-adac8fd1ee79",
+      "name": "archive alt",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        6416,
+        1776
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "message"
+      },
+      "id": "70aa6837-7bb4-4a3a-9cf3-739c0f934a96",
+      "name": "🔴 Flag for Human Review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        6144,
+        -48
+      ],
+      "webhookId": "158c644a-2f34-4ab7-bf2d-6a4e74928820"
+    },
+    {
+      "parameters": {
+        "operation": "message"
+      },
+      "id": "7f5bb074-aae5-48c1-8f38-2a9287f93745",
+      "name": "💬 Slack: Team Digest",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        7248,
+        1056
+      ],
+      "webhookId": "efdb4e66-ed63-4147-92a5-415a516d43b4"
+    },
+    {
+      "parameters": {
+        "content": "Slack digest fires for **every** voice note regardless of intent or routing path. Full team stays informed.",
+        "height": 144,
+        "width": 220,
+        "color": 5
+      },
+      "id": "29622583-31ce-4eae-bbc0-7b98b71f3e58",
+      "name": "slack always",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        7200,
+        1216
+      ]
+    },
+    {
+      "parameters": {
+        "content": "**Sheet columns (in order):**\ntimestamp · sender_name · sender_phone · duration_sec · language · intent · sentiment · summary · transcript · action_items · decisions · key_entities · requires_review · review_reason",
+        "height": 386,
+        "width": 150,
+        "color": 4
+      },
+      "id": "3875ad83-7b02-41c6-9840-5cfaa50410fe",
+      "name": "sheets columns",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        6672,
+        1680
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🔑 Credentials Checklist\nBefore activating:\n- [ ] WhatsApp Bearer Token\n- [ ] OpenAI Bearer Token\n- [ ] ClickUp API Key\n- [ ] HubSpot App Token\n- [ ] Google Sheets OAuth2\n- [ ] Slack API Token\n- [ ] Replace all `<YOUR_..._ID>` placeholders\n- [ ] Register webhook URL in Meta Developer Portal",
+        "height": 328,
+        "width": 340,
+        "color": 2
+      },
+      "id": "8db60030-a341-4b95-8b83-c8e537a9695b",
+      "name": "credentials checklist",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        1152
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "💬 WhatsApp Webhook": {
+      "main": [
+        [
+          {
+            "node": "✅ Acknowledge (200 OK)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "🔍 Parse Webhook Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Parse Webhook Payload": {
+      "main": [
+        [
+          {
+            "node": "📡 Get Media URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📡 Get Media URL": {
+      "main": [
+        [
+          {
+            "node": "⬇️ Download Audio File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⬇️ Download Audio File": {
+      "main": [
+        [
+          {
+            "node": "🎙️ Whisper Transcription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🎙️ Whisper Transcription": {
+      "main": [
+        [
+          {
+            "node": "📝 Prepare Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📝 Prepare Transcript": {
+      "main": [
+        [
+          {
+            "node": "🤖 LLM: Analyse Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🤖 LLM: Analyse Intent": {
+      "main": [
+        [
+          {
+            "node": "🔧 Parse LLM Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔧 Parse LLM Output": {
+      "main": [
+        [
+          {
+            "node": "📂 Intent Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📂 Intent Router": {
+      "main": [
+        [
+          {
+            "node": "🔴 Flag for Human Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "📋 ClickUp — Create Task",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "🗂️ HubSpot — Log Activity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "🗂️ HubSpot — Log Activity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "📊 Archive to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📋 ClickUp — Create Task": {
+      "main": [
+        [
+          {
+            "node": "🔁 Split Remaining Tasks",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "📊 Archive to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "💬 Slack: Team Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔁 Split Remaining Tasks": {
+      "main": [
+        [
+          {
+            "node": "📋 ClickUp — Extra Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🗂️ HubSpot — Log Activity": {
+      "main": [
+        [
+          {
+            "node": "📊 Archive to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "💬 Slack: Team Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📊 Archive to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "💬 Slack: Team Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔴 Flag for Human Review": {
+      "main": [
+        [
+          {
+            "node": "📊 Archive to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📋 ClickUp — Extra Tasks": {
+      "main": [
+        [
+          {
+            "node": "💬 Slack: Team Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "71e615ed-191d-45da-a5aa-10af2a31864f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "706cc62cd2e21312ce21a7eae804b7e6c70500bb07c234346f2ba20f2b66a10e"
+  },
+  "nodeGroups": [],
+  "id": "e5mWVIgbY0PwSK6w",
+  "tags": []
+}
